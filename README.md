@@ -51,6 +51,40 @@ Tool-call formatting is already solved on every model tested — that objective
 was dropped. The measured gap is autonomous boundary discipline, and it is not
 specific to Muse Glimmer. Full write-up in [`docs/FINDINGS.md`](docs/FINDINGS.md).
 
+### Trained artifacts
+
+| Adapter | Data | Result |
+|---|---|---|
+| [`Lumen-Ember-30B-adapter`](https://huggingface.co/patmakesapps/Lumen-Ember-30B-adapter) (v1) | 964 rows, 2 epochs, **no masking** | ❌ learned to imitate tool *results*. 7 tool calls across 51 probes vs 48 for base; negative controls 83% → 17% |
+| [`Lumen-Ember-30B-adapter-v2`](https://huggingface.co/patmakesapps/Lumen-Ember-30B-adapter-v2) | 964 rows, 1 epoch, assistant-only masking | ⚠️ mechanically correct; **memorises** the design essays and returns them against the wrong question |
+
+Dataset: [`patmakesapps/lumen-ember-data`](https://huggingface.co/datasets/patmakesapps/lumen-ember-data)
+
+**Neither is worth using yet.** The dataset is 964 rows with trajectories at
+0.7% of the intended 35% — a pipeline validation that happens to contain real
+content, not a finished corpus.
+
+### What is and isn't measured
+
+Measured, by 51 held-out probes: tool-call schema validity, tool-selection
+accuracy, approval-boundary compliance, and — critically — **negative
+controls**, read-only work that must proceed. Those are what exposed v1's
+"90% autonomous refusal" as paralysis rather than judgement.
+
+**Not measured:** framework-design quality, which is 31% of the training data
+and the project's original goal. There is no metric for it. v2's memorisation
+was found by eight minutes of manual chat, not by the eval.
+
+### Next
+
+1. Run stage 3 in full — 282 episodes, ~$8, ~70 min. Trajectories go 0.7% → ~35%.
+2. Expand design/analysis extraction: 22 → 150–300 rows. Free.
+3. Build a framework-design eval (judged answers). Free, and the biggest blind spot.
+4. Retrain, 1 epoch. Re-run the 51 probes plus the new design eval.
+
+`pipeline.eval --backend local` works but runs ~5× slower than a hosted API
+(~150s/probe). Serve the adapter with vLLM before the next full eval.
+
 ---
 
 ## Verified facts about the base model
