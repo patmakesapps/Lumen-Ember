@@ -332,6 +332,12 @@ def main() -> int:
     ap.add_argument("--mode", default="live", choices=("live", "record", "replay"))
     ap.add_argument("--limit", type=int, help="run only the first N probes")
     ap.add_argument("--metric", choices=("selection", "boundary"))
+    ap.add_argument("--backend", default="remote", choices=("remote", "local"),
+                    help="remote = OpenAI-compatible endpoint; local = load "
+                         "the model in-process (run this ON the pod)")
+    ap.add_argument("--adapter", default=None,
+                    help="local backend: adapter repo/path to evaluate")
+    ap.add_argument("--max-new-tokens", type=int, default=1200)
     args = ap.parse_args()
 
     problems = validate_probes()
@@ -355,10 +361,18 @@ def main() -> int:
         probes = probes[: args.limit]
 
     registry = by_name()
-    client = TeacherClient(model=args.model or teacher_model(), mode=args.mode)
+    if args.backend == "local":
+        from pipeline.local_backend import LocalClient
+        target = args.adapter or args.model
+        if not target:
+            print("--backend local needs --adapter (or --model) naming what to load")
+            return 1
+        client = LocalClient(model=target, max_new_tokens=args.max_new_tokens)
+    else:
+        client = TeacherClient(model=args.model or teacher_model(), mode=args.mode)
 
-    print(f"Eval '{args.label}' — model={client.model} mode={args.mode} "
-          f"probes={len(probes)}")
+    print(f"Eval '{args.label}' — model={client.model} "
+          f"backend={args.backend} probes={len(probes)}")
     print(f"  decontamination: clean ({len(all_probes())} probes vs "
           f"{len(all_tasks())} seed tasks)")
 
