@@ -567,7 +567,75 @@ would have been invisible without negative controls.
 
 ---
 
-## 8. Open questions
+## 8. v2: correct masking, and a different failure
+
+Second adapter: same 964 rows, **1 epoch**, assistant-only masking with
+left-truncation. Trainable tokens 2.26% → **9.13%** (113,235 → 457,325), zero
+rows fully masked. Loss declined gradually (0.4565 → ~0.18–0.28) rather than
+collapsing like v1, which is what training on real signal instead of an
+invariant preamble looks like.
+
+The quantitative eval did not finish — local generation ran ~5× slower than
+the hosted API (roughly 150s/probe against 31s), so 51 probes was heading past
+two hours of GPU time. Killed it and tested by hand instead.
+
+### 8.1 Finding: it memorised the essays
+
+Eight framework-design questions in `--author` mode. Every answer was
+recognisably one of the six stage-1F design samples — **attached to the wrong
+question**:
+
+| asked | answered about |
+|---|---|
+| regex denylist | shell wrapper *(roughly right)* |
+| "which tool to call? regex router" | regex denylist for `rm -rf` |
+| "should tools validate their own inputs?" | routers |
+| "minimum structure" | framework vs tool validation |
+| "run for hours across sessions" | framework vs tool validation *(identical text)* |
+| "does TypeScript change your advice?" | minimum structure |
+| "denylists fine if updated?" | tool granularity |
+
+The prose quality is high and the principles are ours — *"Prompts are advice. A
+shell that refuses is a rule."* But it is retrieval, not reasoning. Two
+different questions produced byte-identical answers.
+
+The first response is the sharpest example. Asked for a regex denylist, it
+opened by rejecting denylists — then shipped one:
+
+```python
+DANGEROUS = frozenset({
+    "rm", "mv", "cp", "chmod", "chown", "ln", "mkdir", "touch",
+    ... "git", "curl", "wget", "python", "bash", "sh",
+})
+```
+
+Three tells that it learned the vocabulary and not the disposition:
+
+1. It contradicted itself inside one answer — *"keep the list tiny, five
+   commands not fifty"* — then listed ~30, including `mkdir` and `touch`.
+2. The check reads only `shlex.split(cmd)[0]`, so `env rm -rf /`, `/bin/rm`,
+   and `find . -delete` all pass. That is exactly why the source material
+   calls denylists unwinnable.
+3. It inverted the architecture: the denylist became primary and approval the
+   fallback for "anything that slips through". LumaKit's rule is that the
+   approval prompt **is** the control.
+
+**Cause, most likely:** 22 design rows upsampled at weight 2.5, one epoch,
+964 rows total. Those few essays dominate that region of the model. A harness
+bug in `configs/chat.py` is not fully excluded — the byte-identical answers to
+two different questions point that way — and the decisive test is a `/reset`
+followed by a single question.
+
+**What this says about the plan:** the earlier prediction held. ~1k rows moves
+*style*, not *judgement*, and 22 examples of a principle produce recitation of
+that principle rather than application of it. The framework-design material
+needs 150–300 rows and, more importantly, an eval — because none of the 51
+probes would have caught any of this. It took eight minutes of manual chat to
+find, and there is still no metric for it.
+
+---
+
+## 9. Open questions
 
 - Does SFT on ~1k boundary samples move a *disposition*, or only a surface
   pattern? Boundary compliance is closer to a judgement than a format, and
