@@ -506,11 +506,45 @@ read-only work that *must* proceed — collapsed from 83% to 17%, which is what
 separates paralysis from judgement. An agent-safety eval without them will
 reward a model for doing nothing.
 
+### 7.1 Correction: the 554-row drop was truncation, not marker matching
+
+Earlier in this document (and in three commit messages) the
+`train_on_responses_only` failure is attributed to Glimmer rendering assistant
+turns with a recipient — `to=user`, `to=read_file`, `to=self` — so a fixed
+marker never matched. **That diagnosis was wrong.**
+
+The real cause surfaced when a hand-written mask dropped *the same 554 rows*.
+Rendering the model's own `chat_template.jinja` locally with Jinja2 showed
+**0 of 964** rows lacking an `<|start|>assistant` chunk, and a tokenizer probe
+on the pod confirmed the marker tokenizes fine. So the marker was always there.
+
+What was not there was the *tail*. Every sample is ordered
+system → user → assistant, so the assistant turn is last. Truncating with
+`input_ids[:max_len]` keeps the **front** and discards exactly the tokens that
+carry gradient. Any row over 8192 tokens lost its entire training signal.
+
+The corpus is much longer than a 300-row dry-run sample suggested: the pod
+measured **5,006,484 tokens across 964 rows** — an average of 5,193 against a
+hard cap of 8192. Left-truncating instead (`input_ids[-max_len:]`) took the
+trainable fraction from **2.26% to 9.13%**, 113,235 → 457,325 tokens, and
+zero-trainable rows from 554 to 0.
+
+Two lessons worth keeping:
+
+- **A plausible explanation that fits the symptom is not a diagnosis.** The
+  recipient-marker story explained the failure perfectly and was wrong; it
+  survived because it was never tested against the rendered text. Rendering
+  the template locally took two minutes and cost nothing.
+- **When two different mechanisms fail on the identical row count, the cause
+  is upstream of both.** 554 appearing twice was the signal, and it was
+  visible the first time.
+
 **Fix.** Neither TRL's helper nor full-sequence training is right for this
 model. `build_masked_example` in `configs/train_unsloth.py` splits the rendered
-text on `<|start|>` and trains only on chunks beginning with `assistant`,
-masking system, user, and tool turns to -100. That keeps all 964 rows *and*
-never trains on a tool result. Verified on a synthetic transcript:
+text on `<|start|>`, trains only on chunks beginning with `assistant`, masks
+system/user/tool turns to -100, and **left-truncates** so the assistant turn
+always survives. That keeps all 964 rows *and* never trains on a tool result.
+Verified on a synthetic transcript:
 
 ```
 mask   'system'
@@ -520,9 +554,13 @@ mask   'tool delete_file'          <- the one that mattered
 TRAIN  'assistant to=user'
 ```
 
-Two guards were added so neither failure mode can recur silently: abort if
-fewer than 90% of rows survive preprocessing, and abort if the trainable token
-fraction falls outside 3–75%.
+Three guards so none of this recurs silently: abort if fewer than 90% of rows
+survive preprocessing, abort if any row has zero trainable tokens, and abort if
+the trainable fraction falls outside 0.5–75%. The floor is 0.5% rather than
+something intuitive like 3% because assistant turns are legitimately a median
+**2.5%** of each row — ~147 assistant tokens against ~2,657 total, since the
+system prompt plus tool-schema block dwarfs the reply. A 3% floor rejected a
+correct mask on the first attempt.
 
 **Cost of learning this: ~$4 training + ~$2 eval.** Cheap for a result that
 would have been invisible without negative controls.

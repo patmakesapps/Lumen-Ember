@@ -30,7 +30,14 @@ This repo builds the **dataset and configs**. It does not run training.
 | 3 | `pipeline.gen_trajectories` — harness built, smoke-tested | ✅ built |
 | 4 | `pipeline.filter` | ✅ built |
 | 5 | `pipeline.mix_external` — 964 train / 44 val | ✅ built |
-| 6 | `configs/train_unsloth.py` + `pipeline.eval` | ✅ built |
+| 6 | `configs/train_unsloth.py` + `pipeline.eval` | ✅ built, trained |
+
+Supporting modules: `pipeline.atem` (parses Glimmer's ATEM tool-call syntax back
+into structured calls — hosted APIs do this for you, self-hosting does not),
+`pipeline.local_backend` (`--backend local`, scores a locally-loaded
+base+adapter), `configs/fetch_data.py` (pulls train/val from the Hub with an
+integrity check), `configs/debug_render.py` (prints what the pod's processor
+actually renders — tokenizer only, no GPU).
 
 **Baseline measured before training** (51 held-out probes, ~$0.12/run):
 
