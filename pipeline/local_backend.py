@@ -39,6 +39,7 @@ class LocalClient:
 
     _model: object = None
     _tok: object = None
+    _text_tok: object = None
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
@@ -54,7 +55,14 @@ class LocalClient:
         )
         FastLanguageModel.for_inference(model)
         self._model, self._tok = model, tok
-        print("  loaded")
+        # Glimmer is multimodal, so this is a MuseGlimmerProcessor, not a
+        # tokenizer. Calling a processor with a bare string makes it try to
+        # base64-decode the text as image data ("Invalid base64-encoded
+        # string"). apply_chat_template lives on the processor; plain
+        # tokenizing and decoding must go to the inner text tokenizer.
+        self._text_tok = getattr(tok, "tokenizer", tok)
+        print(f"  loaded ({type(tok).__name__}"
+              f"{' -> ' + type(self._text_tok).__name__ if self._text_tok is not tok else ''})")
 
     def chat(
         self,
@@ -74,7 +82,7 @@ class LocalClient:
             tokenize=False,
             add_generation_prompt=True,
         )
-        inputs = self._tok(text, return_tensors="pt").to(self._model.device)
+        inputs = self._text_tok(text, return_tensors="pt").to(self._model.device)
         prompt_len = inputs.input_ids.shape[-1]
 
         started = time.monotonic()
@@ -84,12 +92,12 @@ class LocalClient:
                 max_new_tokens=max_tokens or self.max_new_tokens,
                 do_sample=temperature > 0,
                 temperature=temperature if temperature > 0 else None,
-                pad_token_id=self._tok.pad_token_id or self._tok.eos_token_id,
+                pad_token_id=self._text_tok.pad_token_id or self._text_tok.eos_token_id,
             )
         elapsed = time.monotonic() - started
 
         new_tokens = out[0][prompt_len:]
-        completion = self._tok.decode(new_tokens, skip_special_tokens=False)
+        completion = self._text_tok.decode(new_tokens, skip_special_tokens=False)
 
         self.usage.calls += 1
         self.usage.input_tokens += int(prompt_len)
