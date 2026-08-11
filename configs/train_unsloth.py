@@ -130,10 +130,22 @@ def build_masked_example(text: str, tok, max_len: int) -> dict:
     for part in parts[1:]:
         add(TURN_MARK + part, part.startswith("assistant"))
 
+    # LEFT-truncate. The assistant turn is always last (system -> user ->
+    # assistant), so keeping the front discards exactly the tokens that carry
+    # gradient: 554 of 964 rows ended up with every label -100. That is also
+    # what broke train_on_responses_only — same rows, same cause, diagnosed as
+    # a marker-matching problem when it was really truncation.
+    #
+    # Dropping the head of the system preamble costs some tool-schema context;
+    # dropping the tail costs the entire training signal.
+    if len(input_ids) > max_len:
+        input_ids = input_ids[-max_len:]
+        labels = labels[-max_len:]
+
     return {
-        "input_ids": input_ids[:max_len],
-        "labels": labels[:max_len],
-        "attention_mask": [1] * len(input_ids[:max_len]),
+        "input_ids": input_ids,
+        "labels": labels,
+        "attention_mask": [1] * len(input_ids),
     }
 
 
