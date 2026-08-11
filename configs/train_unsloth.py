@@ -123,6 +123,52 @@ def main() -> int:
     args = ap.parse_args()
 
     from datasets import Dataset
+
+    train_rows = load_rows(Path(args.train))
+    val_rows = load_rows(Path(args.val))
+    print(f"  train {len(train_rows):,}   val {len(val_rows):,}")
+
+    # --- dry run: tokenizer only -------------------------------------------
+    # Deliberately BEFORE the model load. The point of --dry-run is to prove
+    # the chat template accepts our data before committing to a ~60 GB
+    # download; loading the model first would make the cheap check expensive.
+    # Glimmer's template raise_exception()s on JSON-string tool arguments, so
+    # this is a real risk, not a formality.
+    if args.dry_run:
+        from transformers import AutoTokenizer
+        print(f"Loading tokenizer only from {args.base} ...")
+        tok = AutoTokenizer.from_pretrained(args.base, trust_remote_code=True)
+
+        rendered, failures = [], []
+        for i, row in enumerate(train_rows):
+            try:
+                rendered.append(tok.apply_chat_template(
+                    row["messages"], tools=row.get("tools") or None,
+                    tokenize=False, add_generation_prompt=False))
+            except Exception as exc:
+                failures.append((i, row.get("id", "?"), f"{type(exc).__name__}: {exc}"))
+
+        print(f"\nrendered {len(rendered)}/{len(train_rows)} rows")
+        if failures:
+            print(f"TEMPLATE FAILURES: {len(failures)}")
+            for i, rid, err in failures[:5]:
+                print(f"  row {i} ({rid}): {err[:220]}")
+            return 1
+
+        print("\n--- first rendered sample (1500 chars) ---")
+        print(rendered[0][:1500])
+
+        lens = sorted(len(tok(t).input_ids) for t in rendered[:300])
+        over = sum(1 for t in rendered if len(tok(t).input_ids) > args.max_seq)
+        print(f"\ntoken length over {len(lens)} sampled rows: "
+              f"median={lens[len(lens) // 2]:,} p90={lens[int(len(lens) * 0.9)]:,} "
+              f"max={lens[-1]:,}")
+        print(f"rows exceeding max_seq_length={args.max_seq}: {over}/{len(rendered)}")
+        print("\nATEM blocks present:",
+              sum(1 for t in rendered if "atem:invoke" in t), "of", len(rendered))
+        print("DRY RUN OK — template accepts the dataset.")
+        return 0
+
     from unsloth import FastLanguageModel
     from unsloth.chat_templates import train_on_responses_only
     from trl import SFTConfig, SFTTrainer
@@ -165,28 +211,10 @@ def main() -> int:
         )
         return {"text": text}
 
-    train_rows = load_rows(Path(args.train))
-    val_rows = load_rows(Path(args.val))
-    print(f"  train {len(train_rows):,}   val {len(val_rows):,}")
-
     train_ds = Dataset.from_list(train_rows).map(
         render, remove_columns=Dataset.from_list(train_rows).column_names)
     val_ds = Dataset.from_list(val_rows).map(
         render, remove_columns=Dataset.from_list(val_rows).column_names)
-
-    if args.dry_run:
-        sample = train_ds[0]["text"]
-        print("\n--- rendered sample (first 1500 chars) ---")
-        print(sample[:1500])
-        lens = [len(tokenizer(t["text"]).input_ids) for t in train_ds.select(
-            range(min(200, len(train_ds))))]
-        lens.sort()
-        print(f"\ntoken length over {len(lens)} sampled rows: "
-              f"median={lens[len(lens) // 2]:,} "
-              f"p90={lens[int(len(lens) * 0.9)]:,} max={lens[-1]:,}")
-        over = sum(1 for n in lens if n > args.max_seq)
-        print(f"rows exceeding max_seq_length={args.max_seq}: {over}/{len(lens)}")
-        return 0
 
     trainer = SFTTrainer(
         model=model,
