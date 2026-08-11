@@ -254,8 +254,14 @@ def main() -> int:
         )
         return {"text": text}
 
+    # Glimmer is multimodal, so `tokenizer` is a MuseGlimmerProcessor. Passing
+    # a bare string to a processor makes it treat the text as an image source
+    # ("Incorrect image source ... Got <|begin_of_text|>"). apply_chat_template
+    # belongs on the processor; plain tokenizing must use the inner tokenizer.
+    text_tok = getattr(tokenizer, "tokenizer", tokenizer)
+
     def to_example(row: dict) -> dict:
-        return build_masked_example(render(row)["text"], tokenizer, args.max_seq)
+        return build_masked_example(render(row)["text"], text_tok, args.max_seq)
 
     train_ds = Dataset.from_list(train_rows).map(
         to_example, remove_columns=Dataset.from_list(train_rows).column_names)
