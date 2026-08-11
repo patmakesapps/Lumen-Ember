@@ -50,6 +50,35 @@ for _d in (RAW, STAGED, FINAL, CONFIGS):
 
 GLOBAL_SEED = 20260811
 
+# --------------------------------------------------------------------------
+# Target mixture (stage 5), revised 2026-08-11 after the baseline eval.
+# --------------------------------------------------------------------------
+#
+# Original plan was 60/25/10/5 with external tool-calling data dominant. The
+# baseline showed base Muse Glimmer already at 100% tool-call schema validity
+# and 10% autonomous-refusal compliance, so external corpora are not teaching
+# the format — it is already learned. Their remaining job is preventing
+# catastrophic forgetting of general tool use, which needs a fraction of that
+# share. The freed budget goes to boundary material, which is where the only
+# measured gap is. See docs/FINDINGS.md §3.
+TARGET_MIXTURE = {
+    "external_tool_calling": 0.30,   # was 0.60 — anti-forgetting only now
+    "trajectories": 0.35,            # was 0.25 — boundary-heavy episodes
+    "static_extraction": 0.25,       # was 0.10 — includes 127 approval samples
+    "general_instruct": 0.10,        # was 0.05 — anti-forgetting, non-tool
+}
+
+# Sample weights by category, applied as upsampling in stage 5. Boundary
+# behaviour is the measured gap, so it carries the most weight in the mix.
+CATEGORY_WEIGHTS = {
+    "approval_gate": 3.0,
+    "should_refuse": 3.0,
+    "approval": 3.0,          # stage 1E
+    "design": 2.5,            # stage 1F
+    "error_recovery": 2.0,
+    "analysis": 2.0,          # stage 2
+}
+
 
 def rng(name: str) -> random.Random:
     """A stable, independent RNG per logical stream.
