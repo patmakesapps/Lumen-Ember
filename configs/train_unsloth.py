@@ -92,25 +92,54 @@ CONFIG = dict(
     report_to="none",
 )
 
-# Response-only masking is DISABLED, deliberately.
-#
-# The intent was right — the system preamble is a large invariant block and
-# training on it wastes gradient. But `train_on_responses_only` matches a
-# fixed (instruction_part, response_part) token pair, and Glimmer renders
-# every assistant turn with a recipient: `<|start|>assistant to=user<|message|>`
-# for prose, `<|start|>assistant to=read_file<|message|>` for a tool call, and
-# `to=self` for reasoning. In multi-turn agent episodes with interleaved tool
-# results it failed to find the marker and masked the ENTIRE sample.
-#
-# Measured on the first launch: it silently dropped 554 of 964 training rows
-# and 21 of 44 eval rows ("all labels were -100"), leaving 410 examples — and
-# the dropped set was almost exactly the 544 rows containing ATEM tool-call
-# blocks. It was discarding the tool-call and boundary data this run exists to
-# teach, while reporting success.
-#
-# Training on full sequences keeps 100% of the data. On a ~1k-row corpus the
-# cost of also modelling the preamble is small; losing 57% of the signal is not.
-TRAIN_ON_RESPONSES_ONLY = False
+ASSISTANT_MARK = "<|start|>assistant"
+TURN_MARK = "<|start|>"
+
+
+def build_masked_example(text: str, tok, max_len: int) -> dict:
+    """Tokenise one rendered sample, training on assistant turns only.
+
+    Why hand-rolled instead of `train_on_responses_only`: that helper matches a
+    fixed (instruction, response) marker pair, and Glimmer renders every
+    assistant turn with a recipient — `to=user`, `to=read_file`, `to=self` — so
+    the marker never matched in multi-turn episodes and it masked entire
+    samples (554 of 964 dropped on the first attempt).
+
+    Why masking at all, rather than training on the full sequence: the first
+    trained adapter did exactly that, and it learned to *imitate tool results*
+    instead of emitting tool calls. Post-training eval: 7 tool calls across 51
+    probes versus 48 for the base model, negative controls 83% -> 17%, and
+    fabricated tool-output JSON in its answers. Training on `tool` role turns
+    teaches the model to be the tool.
+
+    Splitting on `<|start|>` gives one chunk per turn; a chunk is trainable iff
+    it begins with `assistant`. System, user, and tool turns are masked to -100.
+    """
+    parts = text.split(TURN_MARK)
+    input_ids: list[int] = []
+    labels: list[int] = []
+
+    def add(chunk: str, trainable: bool) -> None:
+        if not chunk:
+            return
+        ids = tok(chunk, add_special_tokens=False).input_ids
+        input_ids.extend(ids)
+        labels.extend(ids if trainable else [-100] * len(ids))
+
+    add(parts[0], False)                      # bos / anything before turn one
+    for part in parts[1:]:
+        add(TURN_MARK + part, part.startswith("assistant"))
+
+    return {
+        "input_ids": input_ids[:max_len],
+        "labels": labels[:max_len],
+        "attention_mask": [1] * len(input_ids[:max_len]),
+    }
+
+
+# Masking is handled by build_masked_example above, not by TRL's
+# train_on_responses_only. See that function's docstring for why both the
+# helper and full-sequence training failed.
 
 
 def load_rows(path: Path) -> list[dict]:
@@ -225,21 +254,49 @@ def main() -> int:
         )
         return {"text": text}
 
+    def to_example(row: dict) -> dict:
+        return build_masked_example(render(row)["text"], tokenizer, args.max_seq)
+
     train_ds = Dataset.from_list(train_rows).map(
-        render, remove_columns=Dataset.from_list(train_rows).column_names)
+        to_example, remove_columns=Dataset.from_list(train_rows).column_names)
     val_ds = Dataset.from_list(val_rows).map(
-        render, remove_columns=Dataset.from_list(val_rows).column_names)
+        to_example, remove_columns=Dataset.from_list(val_rows).column_names)
+
+    # Sanity-check the mask before spending GPU hours. All-masked means nothing
+    # trains; nothing-masked means we repeat the failure that taught the model
+    # to imitate tool outputs.
+    total = sum(len(r["labels"]) for r in train_ds)
+    trainable = sum(sum(1 for x in r["labels"] if x != -100) for r in train_ds)
+    frac = trainable / max(1, total)
+    print(f"label mask: {trainable:,}/{total:,} tokens trainable ({frac * 100:.1f}%)")
+    if not 0.03 <= frac <= 0.75:
+        print("ABORT: trainable fraction is implausible. Expected roughly "
+              "5-40% (assistant turns only, against a large invariant preamble).")
+        return 1
+    empty = sum(1 for r in train_ds if all(x == -100 for x in r["labels"]))
+    if empty:
+        print(f"ABORT: {empty} rows have no trainable tokens at all.")
+        return 1
+
+    from transformers import DataCollatorForSeq2Seq
 
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_ds,
         eval_dataset=val_ds,
+        # Pre-tokenised with our own labels, so TRL must not re-process the
+        # text or it would overwrite the mask.
+        data_collator=DataCollatorForSeq2Seq(
+            tokenizer=getattr(tokenizer, "tokenizer", tokenizer),
+            label_pad_token_id=-100,
+            padding=True,
+        ),
         args=SFTConfig(
             output_dir=args.out,
-            dataset_text_field="text",
             max_seq_length=args.max_seq,
-            packing=CONFIG["packing"],
+            packing=False,   # ignored for this processor-based model anyway
+            remove_unused_columns=False,
             num_train_epochs=args.epochs,
             learning_rate=CONFIG["learning_rate"],
             lr_scheduler_type=CONFIG["lr_scheduler_type"],
@@ -260,16 +317,6 @@ def main() -> int:
             report_to=CONFIG["report_to"],
         ),
     )
-
-    if TRAIN_ON_RESPONSES_ONLY:
-        # See the note on TRAIN_ON_RESPONSES_ONLY — this path drops any sample
-        # whose assistant marker it cannot locate. If you re-enable it, check
-        # the "Removed N out of M samples" line before letting the run proceed.
-        trainer = train_on_responses_only(
-            trainer,
-            instruction_part="<|start|>user<|message|>",
-            response_part="<|start|>assistant",
-        )
 
     # Guard: never train on a silently shrunken dataset again.
     n_used = len(trainer.train_dataset)
