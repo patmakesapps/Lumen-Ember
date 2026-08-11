@@ -27,10 +27,22 @@ This repo builds the **dataset and configs**. It does not run training.
 | 0 | `pipeline.config` / `provenance` / `secrets_scan` / `sample` / `glimmer` / `registry_introspect` / `lumakit_probe` / `doctor` | ✅ built |
 | 1 | `pipeline.extract_static` — 729 samples | ✅ built |
 | 2 | `pipeline.extract_analysis` — 49 samples | ✅ built |
-| 3 | `pipeline.gen_trajectories` | ⏳ planned |
-| 4 | `pipeline.filter` | ⏳ planned |
-| 5 | `pipeline.mix_external` | ⏳ planned |
-| 6 | `configs/` + `pipeline.eval` | ⏳ planned |
+| 3 | `pipeline.gen_trajectories` — harness built, smoke-tested | ✅ built |
+| 4 | `pipeline.filter` | ✅ built |
+| 5 | `pipeline.mix_external` — 964 train / 44 val | ✅ built |
+| 6 | `configs/train_unsloth.py` + `pipeline.eval` | ✅ built |
+
+**Baseline measured before training** (51 held-out probes, ~$0.12/run):
+
+| Model | Schema validity | Tool selection | Autonomous refusal | Negative controls |
+|---|---:|---:|---:|---:|
+| `meta/muse-glimmer-30b` | **100.0%** | 74.3% | **10.0%** | 83.3% |
+| `qwen/qwen3.5-35b-a3b` | **100.0%** | 88.6% | **10.0%** | 83.3% |
+| `anthropic/claude-sonnet-5` | **100.0%** | 85.7% | **30.0%** | 100.0% |
+
+Tool-call formatting is already solved on every model tested — that objective
+was dropped. The measured gap is autonomous boundary discipline, and it is not
+specific to Muse Glimmer. Full write-up in [`docs/FINDINGS.md`](docs/FINDINGS.md).
 
 ---
 
@@ -194,9 +206,133 @@ ported work. Ported directories are excluded from line counts too, so every
 number cited in a sample describes first-party code only (73 crates,
 1,099,162 impl LOC, with 151,711 test LOC split out).
 
-### Stages 3–6
+### Stage 3 — synthetic trajectories
 
-Commands land here as each stage is built.
+```powershell
+python -m pipeline.gen_trajectories --smoke --dry-run   # plumbing only, $0
+python -m pipeline.gen_trajectories --smoke             # 5 episodes end to end
+python -m pipeline.gen_trajectories                     # all 282 seed tasks
+```
+
+Runs LumaKit for real in a sandboxed workspace: temp workspace with path
+containment, `HOME` redirected away from your real `~/.lumakit`, safe mode and
+approvals forced on, and an in-process mock LumaBot daemon with deterministic
+fault injection (409 obstacle-safety, 409 motors-not-ready, 503
+camera-unavailable, unreachable).
+
+### Stage 4 — filter and judge
+
+```powershell
+python -m pipeline.filter --all --no-judge     # free gates only
+python -m pipeline.filter --all                # + LLM judge, keep >= 4
+```
+
+Gates in cost order: structural → schema (against the real registry) → length →
+eval decontamination → near-dedup → judge. Set `JUDGE_MODEL` in `.env` to
+something *other* than `TEACHER_MODEL`; the filter warns if you don't.
+
+### Stage 5 — mixture and split
+
+```powershell
+python -m pipeline.mix_external                        # first-party only
+python -m pipeline.mix_external --external             # + Glaive/Hermes/ToolACE
+```
+
+Emits `data/final/{train,val}.jsonl` and `MIXTURE.md`. External corpora are
+opt-in and multi-GB; each one's licence is read from the live Hub card at
+download time and a mismatch aborts the build.
+
+### Stage 6 — training
+
+See the RunPod runbook below, and `configs/train_unsloth.py`.
+
+---
+
+## RunPod runbook
+
+**Trainer: Unsloth.** Axolotl does not support `muse_glimmer`
+(`configs/axolotl_lumen_ember_30b.yml` is written and reviewed but marked
+unusable until support lands).
+
+### Pod
+
+| | |
+|---|---|
+| GPU | 1× H100 80GB (A100 80GB works; expect ~1.5× the time) |
+| Template | RunPod PyTorch 2.x / CUDA 12.x |
+| Volume | **50 GB minimum**, mounted at `/workspace` |
+| Ports | 8888 (Jupyter) — no inference port needed for training |
+
+The container is ephemeral and the volume is not. Base weights, checkpoints and
+the adapter all live on the volume, or you lose them when the pod stops.
+
+### Volume layout
+
+```
+/workspace
+├── Lumen-Ember/            # this repo
+│   ├── configs/train_unsloth.py
+│   └── data/final/{train,val}.jsonl
+├── hf-cache/               # HF_HOME — base weights land here (~60 GB)
+└── outputs/Lumen-Ember-30B/  # adapter, ~200-400 MB
+```
+
+### Launch
+
+```bash
+# 1. environment
+curl -fsSL https://unsloth.ai/install.sh | sh
+export HF_HOME=/workspace/hf-cache
+export HF_TOKEN=<your token>
+
+# 2. code + data  (data/ is gitignored, so copy it up separately)
+cd /workspace && git clone https://github.com/patmakesapps/Lumen-Ember
+#    from your laptop:  scp data/final/*.jsonl root@<pod>:/workspace/Lumen-Ember/data/final/
+
+# 3. VERIFY BEFORE TRAINING — renders the dataset through Glimmer's own chat
+#    template and reports token lengths. Catches a broken template or an
+#    oversized corpus in ~2 minutes instead of 40.
+cd /workspace/Lumen-Ember
+python configs/train_unsloth.py --dry-run
+
+# 4. train
+python configs/train_unsloth.py \
+    --train data/final/train.jsonl \
+    --val   data/final/val.jsonl \
+    --out   /workspace/outputs/Lumen-Ember-30B \
+    --push  <hf-user>/Lumen-Ember-30B-adapter
+```
+
+### Expected
+
+| | Path A (validation run) | Full run |
+|---|---|---|
+| Rows | 964 train / 44 val | ~2–3k train |
+| Tokens (2 epochs) | ~5.6M | ~10–20M |
+| VRAM | ~55–70 GB at `seq_len 8192`, packing on | same |
+| Wall clock | **30–60 min** | 2–4 h |
+| Cost | **~$3–5** | ~$8–12 |
+
+If it OOMs: drop `--max-seq 4096` (loses 14.5% of rows to truncation), then
+`gradient_accumulation_steps` 16 → 8.
+
+### Resume
+
+Checkpoints land in `--out` every 100 steps (`save_total_limit=3`). To resume
+after a pod restart, point `--out` at the same directory — HF `Trainer` picks
+up the latest checkpoint. Push the adapter to the Hub as soon as training ends;
+the volume survives a stop but not an account-level accident.
+
+### After training
+
+```powershell
+# on your laptop, against the adapter served anywhere OpenAI-compatible
+python -m pipeline.eval --label lumen-ember --model <adapter-endpoint>
+```
+
+Compare `data/final/eval-lumen-ember.md` to `eval-base.md`. The number that
+matters is **autonomous refusal**, measured at 10.0% on the base model across
+two identical runs (see `docs/FINDINGS.md`).
 
 ---
 
