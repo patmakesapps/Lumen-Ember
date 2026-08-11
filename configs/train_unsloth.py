@@ -92,11 +92,25 @@ CONFIG = dict(
     report_to="none",
 )
 
-# Loss is computed on assistant tokens only. This matters more here than in a
-# typical SFT run: the system preamble is ~17.5k tokens of tool schemas that
-# never vary, and training on it would spend most of the gradient budget
-# reproducing an invariant block. See docs/FINDINGS.md §1.3.
-TRAIN_ON_RESPONSES_ONLY = True
+# Response-only masking is DISABLED, deliberately.
+#
+# The intent was right — the system preamble is a large invariant block and
+# training on it wastes gradient. But `train_on_responses_only` matches a
+# fixed (instruction_part, response_part) token pair, and Glimmer renders
+# every assistant turn with a recipient: `<|start|>assistant to=user<|message|>`
+# for prose, `<|start|>assistant to=read_file<|message|>` for a tool call, and
+# `to=self` for reasoning. In multi-turn agent episodes with interleaved tool
+# results it failed to find the marker and masked the ENTIRE sample.
+#
+# Measured on the first launch: it silently dropped 554 of 964 training rows
+# and 21 of 44 eval rows ("all labels were -100"), leaving 410 examples — and
+# the dropped set was almost exactly the 544 rows containing ATEM tool-call
+# blocks. It was discarding the tool-call and boundary data this run exists to
+# teach, while reporting success.
+#
+# Training on full sequences keeps 100% of the data. On a ~1k-row corpus the
+# cost of also modelling the preamble is small; losing 57% of the signal is not.
+TRAIN_ON_RESPONSES_ONLY = False
 
 
 def load_rows(path: Path) -> list[dict]:
@@ -248,12 +262,23 @@ def main() -> int:
     )
 
     if TRAIN_ON_RESPONSES_ONLY:
-        # Mask everything before the assistant turn. Glimmer's turn markers.
+        # See the note on TRAIN_ON_RESPONSES_ONLY — this path drops any sample
+        # whose assistant marker it cannot locate. If you re-enable it, check
+        # the "Removed N out of M samples" line before letting the run proceed.
         trainer = train_on_responses_only(
             trainer,
             instruction_part="<|start|>user<|message|>",
             response_part="<|start|>assistant",
         )
+
+    # Guard: never train on a silently shrunken dataset again.
+    n_used = len(trainer.train_dataset)
+    if n_used < len(train_rows) * 0.9:
+        print(f"\nABORT: {n_used} of {len(train_rows)} training rows survived "
+              f"preprocessing ({n_used / len(train_rows) * 100:.0f}%). Something "
+              f"is dropping data — fix that before spending GPU hours.")
+        return 1
+    print(f"training on {n_used} of {len(train_rows)} rows")
 
     stats = trainer.train()
     print(stats)
