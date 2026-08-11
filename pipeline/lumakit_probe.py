@@ -19,29 +19,41 @@ import json
 import subprocess
 import sys
 
-from pipeline.config import LUMAKIT_REPO, RAW
+from pipeline.config import LUMAKIT_REPO, RAW, isolated_lumakit_env
 
 OUT_PATH = RAW / "system_prompts.json"
+
+# Canonical stand-in for the extraction machine's workspace path, so prompts
+# are byte-identical across runs and machines.
+WORKSPACE_PLACEHOLDER = "/workspace"
 
 _DRIVER = r"""
 import contextlib, io, json, os, sys, tempfile
 from pathlib import Path
 
-# Determinism + safety: the default system prompt splices in an identity block
-# built from LUMI_EMAIL_ADDRESS and an on-disk identity file described as
-# "accounts, credentials, site logins". Neither may ever reach a sample, and
-# both would make extraction depend on the developer's machine.
-os.environ.pop('LUMI_EMAIL_ADDRESS', None)
-
+# HOME/USERPROFILE point at a throwaway dir (config.isolated_lumakit_env), so
+# LumaKit builds a pristine data dir and falls back to DEFAULT_CONFIG. Tools
+# are therefore already on, and nothing here can write to the developer's real
+# ~/.lumakit. An earlier version called set_tools_enabled(True), which
+# persists to disk and silently flipped that setting in the live install.
 _buf = io.StringIO()
 with contextlib.redirect_stdout(_buf), contextlib.redirect_stderr(_buf):
-    # Deterministic: never inherit the local ~/.lumakit tool switch.
-    from core.app_runtime_config import set_tools_enabled
-    set_tools_enabled(True)
+    from core.app_runtime_config import tools_enabled
+    from core.paths import get_data_dir
+    assert tools_enabled(), 'isolated data dir should default tools on'
+    _data_dir = str(get_data_dir())
 
     from agent import Agent
     a = Agent()
-    a.set_workspace_root(Path(tempfile.mkdtemp(prefix='lumen-ember-probe-')))
+    # Stable path, not mkdtemp: the default prompt embeds "Current working
+    # directory: <root>", so a random root makes the prompt — and therefore
+    # every sample id derived from it — different on every run.
+    # .resolve() matters on Windows: gettempdir() can hand back the 8.3 short
+    # form (C:\Users\PATRIC~1\...) while set_workspace_root stores the long
+    # form, and then the parent's path substitution silently matches nothing.
+    _ws = (Path(tempfile.gettempdir()) / 'lumen-ember-probe-workspace').resolve()
+    _ws.mkdir(parents=True, exist_ok=True)
+    a.set_workspace_root(_ws)
 
     prompts = {}
     for profile in (None, 'lumabot', 'lumabot_remote'):
@@ -49,7 +61,10 @@ with contextlib.redirect_stdout(_buf), contextlib.redirect_stderr(_buf):
         prompts[profile or 'default'] = a.build_system_prompt()
 
     a.set_runtime_profile(None)
-    meta = {'max_tool_rounds': a.MAX_TOOL_ROUNDS, 'tool_count': len(a.registry.tools)}
+    meta = {'max_tool_rounds': a.MAX_TOOL_ROUNDS,
+            'tool_count': len(a.registry.tools),
+            'data_dir': _data_dir,
+            'workspace_root': str(_ws)}
 
 sys.stdout.write(json.dumps({'prompts': prompts, 'meta': meta}))
 """
@@ -66,12 +81,37 @@ def probe(*, force: bool = False) -> dict:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=isolated_lumakit_env(),
     )
     if proc.returncode != 0:
         raise RuntimeError(
             f"LumaKit probe failed (exit {proc.returncode}):\n{proc.stderr[-3000:]}"
         )
     payload = json.loads(proc.stdout)
+
+    # Normalise the workspace path out of the prompts. It is an absolute path
+    # on the extraction machine, so leaving it in would (a) make the dataset
+    # differ per machine and (b) train the model on somebody's temp directory.
+    # A neutral placeholder is both reproducible and better data.
+    root = payload["meta"].get("workspace_root")
+    if root:
+        for variant in {root, root.replace("\\", "/"), root.replace("\\", "\\\\")}:
+            payload["prompts"] = {
+                k: v.replace(variant, WORKSPACE_PLACEHOLDER)
+                for k, v in payload["prompts"].items()
+            }
+        payload["meta"]["workspace_root"] = WORKSPACE_PLACEHOLDER
+        leaked = [k for k, v in payload["prompts"].items() if root in v]
+        if leaked:
+            raise RuntimeError(
+                f"workspace path survived normalisation in prompts {leaked} — "
+                f"the dataset would not be reproducible. root={root!r}"
+            )
+
+    # The isolated HOME is a fresh mkdtemp per run, so recording it verbatim
+    # would make this file differ on every run for a purely diagnostic field.
+    payload["meta"]["data_dir"] = "<isolated>"
+
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(
         json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",

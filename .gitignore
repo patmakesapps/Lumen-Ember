@@ -3,10 +3,19 @@
 # `git add -f`, a false negative costs a rotated credential and a rewritten
 # history.
 # ---------------------------------------------------------------------------
+# Credential drop-zone: loose .txt files at the project root are assumed to
+# hold secrets unless explicitly allowed below. Named files get caught by the
+# specific rules; this catches the next one nobody remembered to add.
+/*.txt
+!/requirements.txt
+
 huggingface.txt
+openrouter.txt
 hf_token*
 *.token
 *token.txt
+*api_key*
+*apikey*
 .env
 .env.*
 !.env.example.template

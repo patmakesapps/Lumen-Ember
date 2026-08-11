@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from pipeline.config import LUMAKIT_REPO, RAW
+from pipeline.config import LUMAKIT_REPO, RAW, isolated_lumakit_env
 
 OUT_PATH = RAW / "tool_schemas.json"
 
@@ -92,6 +92,7 @@ def dump_registry(*, force: bool = False) -> dict:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=isolated_lumakit_env(),
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -135,6 +136,67 @@ def openai_tools(payload: dict | None = None, *, exposed_only: bool = True) -> l
 def by_name(payload: dict | None = None) -> dict[str, dict]:
     payload = payload or dump_registry()
     return {t["name"]: t for t in payload["tools"]}
+
+
+_VALIDATE_DRIVER = r"""
+import contextlib, io, json, sys, tempfile
+from pathlib import Path
+
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf), contextlib.redirect_stderr(_buf):
+    from tool_registry import ToolRegistry
+    from tools.code_intel.code_index import LazyCodeIndex
+
+    reg = ToolRegistry()
+    reg.load_tools_from_folder(skip_dirs={'code_intel'})
+    for tool in LazyCodeIndex(
+        root=Path(tempfile.mkdtemp(prefix='lumen-ember-validate-')),
+        storage_manager=None,
+    ).get_tools():
+        reg.register(tool, group='code_intel')
+
+    calls = json.loads(sys.stdin.read())
+    results = []
+    for call in calls:
+        name, args = call.get('name'), call.get('arguments')
+        tool = reg.get(name)
+        if tool is None:
+            results.append({'ok': False, 'error': f'Tool not found: {name}'})
+            continue
+        try:
+            normalized = reg.normalize_inputs(args)
+            reg.validate_inputs(dict(normalized), tool['inputSchema'])
+            results.append({'ok': True, 'error': None})
+        except Exception as exc:
+            results.append({'ok': False, 'error': str(exc)})
+
+sys.stdout.write(json.dumps(results))
+"""
+
+
+def validate_calls(calls: list[dict]) -> list[dict]:
+    """Validate (name, arguments) pairs against the REAL registry schemas.
+
+    Uses LumaKit's own `normalize_inputs` + `validate_inputs` rather than a
+    reimplementation, so the eval measures what the framework would actually
+    accept — including its forgiving coercions ('5' -> 5) and its refusal to
+    accept True for an integer.
+    """
+    if not calls:
+        return []
+    proc = subprocess.run(
+        [sys.executable, "-c", _VALIDATE_DRIVER],
+        cwd=str(LUMAKIT_REPO),
+        input=json.dumps(calls),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=isolated_lumakit_env(),
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"Registry validation failed:\n{proc.stderr[-2000:]}")
+    return json.loads(proc.stdout)
 
 
 def _main() -> int:

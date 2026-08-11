@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import random
+import tempfile
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -96,6 +97,35 @@ GROK_EXCLUDED_PATHS = (
     "NOTICE",
     "Cargo.lock",
 )
+
+
+def isolated_lumakit_env() -> dict:
+    """Env for LumaKit subprocesses that cannot touch the real ~/.lumakit.
+
+    `core.paths.get_data_dir()` hardcodes `Path.home() / ".lumakit"` with no
+    override, and that directory is shared with the developer's *installed*
+    LumaKit. It holds `app_runtime_config.json` (tool switch, safe mode,
+    approvals), the memory DB, chat store, code index, and a web session
+    token. Reading it makes extraction depend on local machine state; writing
+    it mutates a live application — `set_tools_enabled()` persists to disk, so
+    an innocent-looking probe silently flips a setting in the real install.
+
+    Redirecting HOME/USERPROFILE at a throwaway directory gives LumaKit a
+    pristine data dir, so it falls back to DEFAULT_CONFIG (tools_enabled=True,
+    safe_mode=True) — deterministic, and inert with respect to the user's
+    machine. Stage 3 uses the same isolation for its sandboxed episodes.
+    """
+    env = dict(os.environ)
+    home = tempfile.mkdtemp(prefix="lumen-ember-home-")
+    env["HOME"] = home
+    env["USERPROFILE"] = home
+    # Windows expanduser falls back to HOMEDRIVE+HOMEPATH if USERPROFILE is
+    # absent; drop them so there is no path back to the real profile.
+    env.pop("HOMEDRIVE", None)
+    env.pop("HOMEPATH", None)
+    # Never let the developer's identity leak into an extracted system prompt.
+    env.pop("LUMI_EMAIL_ADDRESS", None)
+    return env
 
 
 def is_denied_path(path: str | Path) -> bool:
