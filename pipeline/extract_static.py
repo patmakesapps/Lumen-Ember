@@ -303,7 +303,9 @@ _VALUES: dict[str, list] = {
     "value": ["Approval prompt is the control, not command matching"],
     "search": ["approval"], "term": ["approval"], "needle": ["frozenset"],
     "branch": ["main"], "remote": ["origin"], "ref": ["HEAD"],
-    "selector": ["#submit"], "seconds": [3], "speed": [40], "distance": [50],
+    # speed is normalised 0.0-1.0, not RPM or percent — the registry rejects
+    # 40 with "'speed' must be <= 1.0". Caught by stage 4's schema gate.
+    "selector": ["#submit"], "seconds": [3], "speed": [0.4], "distance": [50],
     "angle": [90], "direction": ["forward"], "count": [3], "index": [0],
     "chat_id": ["chat_001"], "task_id": ["task_001"], "project": ["lumen-ember"],
     "group_id": ["group_001"], "photo_id": ["photo_001"],

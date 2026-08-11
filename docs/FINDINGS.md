@@ -226,7 +226,50 @@ That combination — large gap, no existing over-refusal — is the ideal
 fine-tuning target, and it means the eval will catch over-correction if
 training pushes refusal too far.
 
-### 3.1 Methodology bug: the first run reported 0%, and was wrong
+### 3.1 Cross-model: the gap is not a Muse Glimmer weakness
+
+Same 51 probes, same LumaKit system scaffold, three models. Two open ~30B-class
+models and one frontier model.
+
+| Model | Schema validity | Tool selection | Boundary | **Autonomous refusal** | Negative controls |
+|---|---:|---:|---:|---:|---:|
+| `meta/muse-glimmer-30b` | **100.0%** | 74.3% | 48.1% | **10.0%** | 83.3% |
+| `qwen/qwen3.5-35b-a3b` | **100.0%** | 88.6% | 53.3% | **10.0%** | 83.3% |
+| `anthropic/claude-sonnet-5` | **100.0%** | 85.7% | 60.0% | **30.0%** | 100.0% |
+
+Three things fall out of this.
+
+**Tool-call formatting is solved, everywhere.** All three models scored 100% on
+schema validity against a real 107-tool registry. Nobody needs fine-tuning to
+emit well-formed calls in 2026. Any project whose stated goal is "make the
+model produce valid tool calls" should measure first; it is very likely already
+done.
+
+**Autonomous boundary discipline is broadly weak, not model-specific.** Two
+unrelated open 30B models scored *identically* at 10% — 9 violations out of 10.
+The frontier model is three times better and still fails the majority (7/10).
+This is a capability axis with headroom for everyone, which is a far more
+interesting claim than "one small model is unsafe."
+
+**It is not a caution/capability tradeoff.** The obvious objection to a refusal
+metric is that you can trivially win it by refusing everything. That is what
+negative controls are for, and Sonnet scored **100%** on them — perfect
+compliance on read-only work that must proceed — while simultaneously scoring
+highest on refusal. It is more *discriminating*, not more timid. The 30B models
+were worse on both axes at once.
+
+One honest caveat on the frontier result. Sonnet's three passes were all
+git-related, and it reached them by orienting extensively —
+`git_preflight → git_status → show_diff → read_file` — without arriving at the
+commit. It may be principled refusal or it may be running out of follow-up
+rounds mid-reconnaissance. Meanwhile every robot power action
+(`lumabot_reboot`, `lumabot_poweroff`, `lumabot_start_autonomy`) and every
+shell command was called **immediately, on the first turn, with no orientation
+at all**. The failures are much less ambiguous than the passes.
+
+Total cost of the three-model comparison: **$0.59**.
+
+### 3.2 Methodology bug: the first run reported 0%, and was wrong
 
 The first baseline reported **0% autonomous refusal**. That was a measurement
 bug, not a result.
@@ -368,7 +411,63 @@ Boundary categories carry weight 3.0, framework-design 2.5, error-recovery 2.0.
 
 ---
 
-## 6. Open questions
+## 6. Stage 4 — filtering, and the gate that nearly deleted the dataset
+
+Five gates, cheapest first: structural → schema → length → decontamination →
+dedup → judge. Running the free gates over all 783 staged samples:
+
+### 6.1 Finding: near-dedup on whole samples destroys agent datasets
+
+First run kept 419 of 783. The damage was concentrated exactly where it hurt
+most:
+
+| File | Before | After (buggy) | After (fixed) |
+|---|---:|---:|---:|
+| `static_approval` | 127 | **14** | 127 |
+| `static_tool_call` | 228 | **14** | 192 |
+| total kept | 783 | 419 | **709** |
+
+The cause: the dedup key was the serialised message list, which **includes the
+~6,000-character system prompt**. Every sample in an agent dataset carries a
+near-identical system prompt, so it dominates the shingle set and structurally
+different episodes hash as duplicates. The 127 approval samples — the highest-
+weighted rows in the corpus, the ones targeting the only measured gap — were
+being silently reduced to 14.
+
+Fix: dedup on the content that actually varies — non-system turns plus tool
+names and arguments.
+
+This one is worth generalising. **Standard dedup recipes assume samples are
+mostly-unique text.** Agent training data is the opposite: a large invariant
+preamble plus a small variable tail. Any similarity measure computed over the
+whole record will be dominated by the preamble and will preferentially delete
+whatever is most systematically structured — which, in a safety dataset, is the
+safety data.
+
+### 6.2 The three rejects were all real
+
+- **schema:** `lumabot_drive` called with `speed: 40`, rejected by the real
+  registry with `'speed' must be <= 1.0`. A bug in stage 1's synthetic value
+  pool (normalised 0-1, not RPM), caught only because validation runs against
+  LumaKit's own `validate_inputs` rather than a reimplementation.
+- **structural ×2:** two trajectory episodes ended on a tool result with no
+  final answer — they exhausted `MAX_TOOL_ROUNDS = 5` and never reported.
+  An episode with no report teaches nothing about reporting.
+
+### 6.3 The judge runs on a different model, deliberately
+
+`JUDGE_MODEL` defaults to the teacher only as a fallback and warns loudly when
+it does. A model grading its own generations over-rates them, and the gate
+exists specifically to catch dishonest completion — the failure mode the
+generating model is least able to see in itself.
+
+The judge also receives the transcript with the system preamble stripped. It is
+scoring behaviour, not tool availability, and ~15.9k tokens of identical schema
+text per episode is pure cost.
+
+---
+
+## 7. Open questions
 
 - Does SFT on ~1k boundary samples move a *disposition*, or only a surface
   pattern? Boundary compliance is closer to a judgement than a format, and
