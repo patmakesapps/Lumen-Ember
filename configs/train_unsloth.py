@@ -274,10 +274,16 @@ def main() -> int:
     total = sum(len(r["labels"]) for r in train_ds)
     trainable = sum(sum(1 for x in r["labels"] if x != -100) for r in train_ds)
     frac = trainable / max(1, total)
-    print(f"label mask: {trainable:,}/{total:,} tokens trainable ({frac * 100:.1f}%)")
-    if not 0.03 <= frac <= 0.75:
-        print("ABORT: trainable fraction is implausible. Expected roughly "
-              "5-40% (assistant turns only, against a large invariant preamble).")
+    print(f"label mask: {trainable:,}/{total:,} tokens trainable ({frac * 100:.2f}%)")
+    # Floor is 0.5%, not 3%. Measured on this corpus the assistant turns are a
+    # median 2.5% of each row: ~147 assistant tokens against ~2,657 total,
+    # because the system prompt plus the tool-schema block dwarfs the reply.
+    # A 3% floor rejected a perfectly correct mask. The failure this guard
+    # exists to catch is ~0% (nothing trains) or ~100% (training on tool
+    # outputs, which produced the v1 adapter that hallucinated tool results).
+    if not 0.005 <= frac <= 0.75:
+        print("ABORT: trainable fraction is implausible. Near 0 means nothing "
+              "trains; near 1 means system/user/tool turns are unmasked.")
         return 1
     empty = sum(1 for r in train_ds if all(x == -100 for x in r["labels"]))
     if empty:
