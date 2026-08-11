@@ -1,0 +1,27 @@
+# Lumen-Ember dataset pipeline — pinned-ish deps.
+# Install:  python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
+
+# Core
+orjson>=3.10.0            # fast, deterministic JSONL
+jsonschema>=4.21.0        # sample + tool-call schema validation
+python-dotenv>=1.0.0      # LumaKit imports this at registry load
+pyyaml>=6.0
+
+# Chat-template rendering / tokenization (Glimmer's Onyx ATEM template)
+transformers>=4.57.0      # must be new enough for muse_glimmer; verified at runtime
+jinja2>=3.1.0
+tokenizers>=0.20.0
+
+# External dataset pull (stage 5)
+datasets>=3.0.0
+huggingface_hub>=0.26.0
+
+# Teacher endpoint (stage 3/4)
+httpx>=0.27.0
+
+# Dedup (stage 4)
+datasketch>=1.6.5         # MinHash LSH near-dedup
+regex>=2024.5.15
+
+# Dev
+pytest>=8.0.0

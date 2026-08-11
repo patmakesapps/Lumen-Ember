@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# SECRETS — never commit. Broad on purpose: a false positive costs one
+# `git add -f`, a false negative costs a rotated credential and a rewritten
+# history.
+# ---------------------------------------------------------------------------
+huggingface.txt
+hf_token*
+*.token
+*token.txt
+.env
+.env.*
+!.env.example.template
+config.env
+credentials*
+creds*
+secrets*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+*.credentials.json
+service-account*.json
+.huggingface/
+.netrc
+
+# ---------------------------------------------------------------------------
+# Source checkouts — these are independent git repositories, cloned by the
+# commands in README.md. Committing them would nest repos and add ~1 GB.
+# ---------------------------------------------------------------------------
+sources/
+
+# ---------------------------------------------------------------------------
+# Generated data. Every stage is deterministic and idempotent, so these
+# regenerate byte-identically from the pipeline plus the pinned source SHAs.
+# The dataset itself belongs on the Hugging Face Hub, not in git history.
+# ---------------------------------------------------------------------------
+data/
+!data/.gitkeep
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# ---------------------------------------------------------------------------
+# Training artifacts — these belong on the Hub, not in git.
+# ---------------------------------------------------------------------------
+outputs/
+checkpoints/
+adapter/
+*.safetensors
+*.gguf
+*.bin
+wandb/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
